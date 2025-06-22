@@ -120,3 +120,5 @@ dependencies/gitman.log
 # Ignore venv
 .venv/
 venv/
+
+/dependencies
