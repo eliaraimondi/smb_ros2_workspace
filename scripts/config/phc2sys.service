@@ -1,0 +1,12 @@
+[Unit]
+Description=Synchronize system clock or PTP hardware clock (PHC)
+Documentation=man:phc2sys
+After=ptp4l.service
+
+[Service]
+Type=simple
+#sync all ptp network clocks(-a), first -r to include CLOCK_REALTIME, second -r makes CLOCK_REALTIME a time source
+ExecStart=/usr/sbin/phc2sys -a -r -r --step_threshold=1
+
+[Install]
+WantedBy=multi-user.target

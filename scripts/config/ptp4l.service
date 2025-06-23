@@ -1,0 +1,16 @@
+# /etc/systemd/system/ptp4l.service
+[Unit]
+Description=Precision Time Protocol (PTP) Grand-master
+Documentation=man:ptp4l
+After=sys-subsystem-net-devices-enp86s0.device
+Requires=sys-subsystem-net-devices-enp86s0.device
+
+[Service]
+Type=simple
+# -m : log to the journal        -2 : two-step mode (good with a PHC/NIC)
+# --tx_timestamp_timeout=10000 raises the default 1-second TX timestamp timeout
+ExecStart=/usr/sbin/ptp4l -i enp86s0 -m -2 --tx_timestamp_timeout=10000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
