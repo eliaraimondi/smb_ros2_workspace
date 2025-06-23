@@ -161,14 +161,14 @@ ${ROOT}/scripts/setup/setup-fzf.sh 0.52.1
 if [ "$IS_NUC" = true ]; then
 
     # Setup PTP & PHC
-    readonly PTP4L_CONF="${ROOT}/scripts/config/ptp4l.service"
+    readonly PTP4L_CONF="${ROOT}/scripts/config/ptp4l_nuc.service"
     cp "$PTP4L_CONF" "/etc/systemd/system/ptp4l.service"
 
     systemctl daemon-reload
     systemctl enable ptp4l
     systemctl start ptp4l
 
-    readonly PHC2SYS_CONF="${ROOT}/scripts/config/phc2sys.service"
+    readonly PHC2SYS_CONF="${ROOT}/scripts/config/phc2sys_nuc.service"
     cp "$PHC2SYS_CONF" "/etc/systemd/system/phc2sys.service"
 
     systemctl daemon-reload
@@ -186,6 +186,23 @@ if [ "$IS_NUC" = true ]; then
 
     echo "Setting up Graph MSF..."
     ${ROOT}/scripts/setup/setup-graph-msf.sh
+fi
+
+if [ "$IS_JETSON" = true ]; then
+    # Setup PTP & PHC
+    readonly PTP4L_CONF="${ROOT}/scripts/config/ptp4l_jetson.service"
+    cp "$PTP4L_CONF" "/etc/systemd/system/ptp4l.service"
+
+    systemctl daemon-reload
+    systemctl enable ptp4l
+    systemctl start ptp4l
+
+    readonly PHC2SYS_CONF="${ROOT}/scripts/config/phc2sys_jetson.service"
+    cp "$PHC2SYS_CONF" "/etc/systemd/system/phc2sys.service"
+
+    systemctl daemon-reload
+    systemctl enable phc2sys
+    systemctl start phc2sys
 fi
 
 # Create symlink for network configuration

@@ -1,0 +1,10 @@
+[Unit]
+Description=PTP Slave Client (Jetson)
+After=network.target
+
+[Service]
+ExecStart=/usr/sbin/ptp4l -i eth0 -2 -m -s
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

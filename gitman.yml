@@ -148,7 +148,7 @@ sources:
         target: src/visualization/joy_panel_cpp
   - name: smb_object_detection
     repo: https://github.com/ETHZ-RobotX/smb_object_detection_ros2.git
-    rev: docker_working
+    rev: main
     type: git
     links:
       - source: .
