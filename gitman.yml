@@ -52,8 +52,8 @@ sources:
       - source: .
         target: src/core/smb_ui
   - name: holistic_fusion
-    repo: https://github.com/leggedrobotics/holistic_fusion.git
-    rev: julian/feature/ros2
+    repo: https://github.com/nicop111/holistic_fusion
+    rev: rss
     type: git
     links:
       - source: .
