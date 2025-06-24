@@ -1,0 +1,14 @@
+exploration_controller:
+  ros__parameters:
+    # Delay before starting exploration (seconds)
+    start_delay_seconds: 3.0
+    
+    # Use Empty messages instead of Bool messages
+    # Set to true if the tare_planner expects Empty messages
+    use_empty_messages: false
+    
+    # Additional timing parameters
+    publication_rate_hz: 10.0
+    
+    # Logging level (DEBUG, INFO, WARN, ERROR)
+    log_level: "INFO"
