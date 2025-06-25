@@ -27,7 +27,7 @@ public:
     {
         // Create publisher for /goal_point topic
         goal_publisher_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
-            "/goal_point", 10);
+            "/way_point", 10);
         
         // Create publisher for /start_exploration topic
         start_exploration_publisher_ = this->create_publisher<std_msgs::msg::Bool>(
@@ -46,6 +46,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "ExplorationManager Node started");
         RCLCPP_INFO(this->get_logger(), "Waiting for initial robot pose from /state_estimation...");
         RCLCPP_INFO(this->get_logger(), "Will return home on: timeout (60s) OR /exploration_finish=true");
+        RCLCPP_INFO(this->get_logger(), "Note: Robot will end at starting position with 180° rotated orientation");
     }
 
 private:
@@ -54,16 +55,6 @@ private:
     {
         // Convert quaternion to yaw angle
         return atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-    }
-    
-    // Helper function to calculate angular difference between two yaw angles
-    double getAngularDifference(double angle1, double angle2)
-    {
-        double diff = angle1 - angle2;
-        // Normalize to [-pi, pi]
-        while (diff > M_PI) diff -= 2.0 * M_PI;
-        while (diff < -M_PI) diff += 2.0 * M_PI;
-        return fabs(diff);
     }
     
     void state_estimation_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
@@ -129,7 +120,7 @@ private:
             }
         }
         
-        // Check if robot has reached the final backward position (starting position)
+        // Check if robot has reached the starting position (with 180° rotated orientation)
         if (current_state_ == RobotState::MOVING_BACKWARD_FINAL)
         {
             double distance_to_start = sqrt(
@@ -138,18 +129,11 @@ private:
                 pow(current_pose_.pose.position.z - starting_pose_.pose.position.z, 2)
             );
             
-            // Check orientation alignment
-            double current_yaw = getYawFromQuaternion(current_pose_.pose.orientation);
-            double target_yaw = getYawFromQuaternion(starting_pose_.pose.orientation);
-            double angular_diff = getAngularDifference(current_yaw, target_yaw);
+            RCLCPP_DEBUG(this->get_logger(), "Distance to starting position: %.3f meters", distance_to_start);
             
-            RCLCPP_DEBUG(this->get_logger(), "Distance to start: %.3f m, Angular diff: %.3f rad", 
-                        distance_to_start, angular_diff);
-            
-            if (distance_to_start < 0.15 && angular_diff < 0.1)  // 15cm position, 0.1 rad (~5.7°) orientation tolerance
+            if (distance_to_start < 0.15)  // 15cm tolerance - only check position, not orientation
             {
-                RCLCPP_INFO(this->get_logger(), "Reached starting position! Distance: %.3f m, Angular diff: %.3f rad", 
-                           distance_to_start, angular_diff);
+                RCLCPP_INFO(this->get_logger(), "Reached starting position! Distance: %.3f m (orientation is 180° rotated)", distance_to_start);
                 start_maintaining_position();
             }
         }
@@ -207,7 +191,7 @@ private:
         
         // Start exploration timeout timer
         timeout_timer_ = this->create_wall_timer(
-            std::chrono::seconds(1500),
+            std::chrono::seconds(60),
             std::bind(&ExplorationManager::timeout_callback, this));
         
         // Signal the tare planner to start exploration
@@ -293,7 +277,7 @@ private:
     
     void start_final_backward_movement()
     {
-        RCLCPP_INFO(this->get_logger(), "Starting final movement back to exact starting position");
+        RCLCPP_INFO(this->get_logger(), "Starting final forward movement back to starting position");
         current_state_ = RobotState::MOVING_BACKWARD_FINAL;
         
         // Cancel continuous timer
@@ -302,47 +286,46 @@ private:
             continuous_timer_->cancel();
         }
         
-        RCLCPP_INFO(this->get_logger(), "Target: exact starting position (%.2f, %.2f, %.2f) with original orientation",
-                    starting_pose_.pose.position.x, starting_pose_.pose.position.y, starting_pose_.pose.position.z);
+        // Target: move forward from initial_pose toward the starting position
+        // Robot will arrive at starting position facing opposite direction (180° rotated)
+        forward_to_start_target_ = starting_pose_.pose.position;
         
-        // Start continuous publishing of starting pose goal (5 Hz)
+        RCLCPP_INFO(this->get_logger(), "Target: starting position (%.2f, %.2f, %.2f) - robot will arrive facing opposite direction",
+                    forward_to_start_target_.x, forward_to_start_target_.y, forward_to_start_target_.z);
+        
+        // Start continuous publishing of forward-to-start goal (5 Hz)
         backward_goal_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(200),
-            std::bind(&ExplorationManager::publish_starting_pose_goal, this));
+            std::bind(&ExplorationManager::publish_forward_to_start_goal, this));
         
-        RCLCPP_INFO(this->get_logger(), "Started continuous starting pose goal publishing at 5 Hz");
+        RCLCPP_INFO(this->get_logger(), "Started continuous forward-to-start goal publishing at 5 Hz");
     }
     
-    void publish_starting_pose_goal()
+    void publish_forward_to_start_goal()
     {
-        auto pose_goal = geometry_msgs::msg::PoseStamped();
-        pose_goal.header.stamp = this->now();
-        pose_goal.header.frame_id = "map";
-        pose_goal.pose = starting_pose_.pose;  // Use full pose (position + orientation)
+        auto forward_goal = geometry_msgs::msg::PointStamped();
+        forward_goal.header.stamp = this->now();
+        forward_goal.header.frame_id = "map";
+        forward_goal.point = forward_to_start_target_;
         
-        // Also publish as PointStamped for compatibility with existing goal system
-        auto point_goal = geometry_msgs::msg::PointStamped();
-        point_goal.header = pose_goal.header;
-        point_goal.point = starting_pose_.pose.position;
+        goal_publisher_->publish(forward_goal);
         
-        goal_publisher_->publish(point_goal);
-        
-        RCLCPP_DEBUG(this->get_logger(), "Published starting pose goal: (%.2f, %.2f, %.2f)", 
-                    point_goal.point.x, point_goal.point.y, point_goal.point.z);
+        RCLCPP_DEBUG(this->get_logger(), "Published forward-to-start goal: (%.2f, %.2f, %.2f)", 
+                    forward_goal.point.x, forward_goal.point.y, forward_goal.point.z);
     }
     
     void start_maintaining_position()
     {
-        RCLCPP_INFO(this->get_logger(), "Sequence complete! Now maintaining starting position");
+        RCLCPP_INFO(this->get_logger(), "Sequence complete! Now maintaining starting position (with 180° rotated orientation)");
         current_state_ = RobotState::MAINTAINING_START_POSITION;
         
-        // Cancel backward goal timer
+        // Cancel forward-to-start goal timer
         if (backward_goal_timer_)
         {
             backward_goal_timer_->cancel();
         }
         
-        // Start continuous publishing of starting pose to maintain position (2 Hz)
+        // Start continuous publishing of starting position to maintain position (2 Hz)
         maintain_position_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(500),
             std::bind(&ExplorationManager::publish_maintain_position, this));
@@ -392,10 +375,11 @@ private:
     rclcpp::TimerBase::SharedPtr maintain_position_timer_;
     
     RobotState current_state_;
-    geometry_msgs::msg::PoseStamped starting_pose_;      // Robot's pose when node starts (final target)
-    geometry_msgs::msg::PoseStamped initial_pose_;       // Robot's pose after moving 1m forward
+    geometry_msgs::msg::PoseStamped starting_pose_;       // Robot's original pose when node starts
+    geometry_msgs::msg::PoseStamped initial_pose_;        // Robot's pose after moving 1m forward (exploration start)
     geometry_msgs::msg::PoseStamped current_pose_;
-    geometry_msgs::msg::Point forward_target_position_;  // Target position 1m forward
+    geometry_msgs::msg::Point forward_target_position_;   // Target position 1m forward from start
+    geometry_msgs::msg::Point forward_to_start_target_;   // Target position: starting position (for return)
     bool initial_pose_received_;
 };
 
