@@ -43,4 +43,14 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+
+add_executable(start_conditions src/start_conditions.cpp)
+ament_target_dependencies(start_conditions rclcpp std_msgs geometry_msgs)
+install(TARGETS start_conditions DESTINATION lib/${PROJECT_NAME})
+
+add_executable(odom_to_point_node src/odom_to_point_node.cpp)
+ament_target_dependencies(odom_to_point_node rclcpp nav_msgs geometry_msgs)
+install(TARGETS odom_to_point_node DESTINATION lib/${PROJECT_NAME})
+  
+
 ament_package()
