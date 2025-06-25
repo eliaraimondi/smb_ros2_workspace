@@ -215,8 +215,8 @@ def generate_launch_description():
         {'use_sim_time': use_sim_time},
         {'start_delay_seconds': LaunchConfiguration('start_delay_seconds')},
         {'use_empty_messages': LaunchConfiguration('use_empty_messages')}
-    ]
-)
+        ]
+    )
     
     return LaunchDescription([
         *launch_args,
@@ -230,7 +230,7 @@ def generate_launch_description():
         local_odometry,
         static_tf_map_to_odom,
         exploration_launch,
-        #far_planner_launch,
+        far_planner_launch,
         local_planner_launch,
         twist_pid,
         twist_mux,

@@ -12,5 +12,6 @@
     "git.autoRepositoryDetection": true,
     "git.repositoryScanMaxDepth": 5,
     "git.ignoredRepositories": [
-    ]
+    ],
+    "cmake.sourceDirectory": "/smb_ros2_workspace/dependencies/direct_lidar_inertial_odometry"
 }

@@ -13,6 +13,7 @@ find_package(geometry_msgs REQUIRED)
 
 # Add executables
 add_executable(exploration_manager src/exploration_manager.cpp)
+add_executable(exploration_manager2 src/exploration_manager2.cpp)
 
 # Specify dependencies
 ament_target_dependencies(exploration_manager
@@ -21,9 +22,16 @@ ament_target_dependencies(exploration_manager
   std_msgs
 )
 
+ament_target_dependencies(exploration_manager2
+  rclcpp   
+  geometry_msgs   
+  std_msgs
+)
+
 # Install targets
 install(TARGETS
   exploration_manager
+  exploration_manager2
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -16,6 +16,7 @@
 		// "--volume=/tmp/.X11-unix/X0:/tmp/.X11-unix/X0", 
 		"--shm-size=2g", // 2GB of shared memory, increase if you have extra memory or decrease if you have limited memory
 		"--network=host",
+		"--memory=4g",
 		// "-v",
 		// "${localEnv:HOME}/.gitcache:/home/${localEnv:USER}/.gitcache",
 		"--device=/dev/dri"
