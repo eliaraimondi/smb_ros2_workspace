@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 # Add executables
 add_executable(exploration_manager src/exploration_manager.cpp)
@@ -20,12 +21,14 @@ ament_target_dependencies(exploration_manager
   rclcpp 
   geometry_msgs 
   std_msgs
+  nav_msgs
 )
 
 ament_target_dependencies(exploration_manager2
   rclcpp   
   geometry_msgs   
   std_msgs
+  nav_msgs
 )
 
 # Install targets

@@ -1,280 +1,402 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/string.hpp>
-#include <std_msgs/msg/empty.hpp>
-#include <vector>
-#include <chrono>
+#include <cmath>
 
-enum class ExplorationState {
-    IDLE,
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+enum class RobotState {
+    WAITING_FOR_INITIAL_POSE,
+    MOVING_FORWARD_INITIAL,
+    SAVING_INITIAL_POSE,
     EXPLORING,
-    NAVIGATING_TO_OBJECT,
-    CAPTURING_IMAGES,
-    GOING_HOME,
-    MISSION_COMPLETE
-};
-
-struct DetectedObject {
-    int id;
-    geometry_msgs::msg::Point location;
-    bool visited;
-    bool images_captured;
+    RETURNING_HOME,
+    MOVING_BACKWARD_FINAL,
+    MAINTAINING_START_POSITION,
+    COMPLETE
 };
 
 class ExplorationManager : public rclcpp::Node
 {
 public:
-    ExplorationManager() : Node("exploration_manager"), 
-                          current_state_(ExplorationState::IDLE),
-                          mission_start_time_(this->now()),
-                          max_mission_time_(std::chrono::minutes(2))
+    ExplorationManager() : Node("exploration_manager"), current_state_(RobotState::WAITING_FOR_INITIAL_POSE), initial_pose_received_(false)
     {
-        // Publishers
-        exploration_command_pub_ = this->create_publisher<std_msgs::msg::String>("/exploration_command", 10);
-        navigation_goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/navigation_goal", 10);
-        image_capture_pub_ = this->create_publisher<std_msgs::msg::Empty>("/capture_images", 10);
-        go_home_pub_ = this->create_publisher<std_msgs::msg::Empty>("/go_home", 10);
-        waypoint_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/way_point", 10);
+        // Create publisher for /goal_point topic
+        goal_publisher_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
+            "/goal_point", 10);
         
-        // Subscribers  
-        mission_complete_subscriber_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/mission_complete", 10,
-            std::bind(&ExplorationManager::mission_complete_callback, this, std::placeholders::_1));
-            
-        detected_object_subscriber_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
-            "/detected_objects", 10,
-            std::bind(&ExplorationManager::detected_object_callback, this, std::placeholders::_1));
-            
-        navigation_status_subscriber_ = this->create_subscription<std_msgs::msg::String>(
-            "/navigation_status", 10,
-            std::bind(&ExplorationManager::navigation_status_callback, this, std::placeholders::_1));
-            
-        image_capture_status_subscriber_ = this->create_subscription<std_msgs::msg::Bool>(
-            "/image_capture_complete", 10,
-            std::bind(&ExplorationManager::image_capture_status_callback, this, std::placeholders::_1));
-
-        // Timer to check mission time and state
-        state_timer_ = this->create_wall_timer(
-            std::chrono::seconds(1),
-            std::bind(&ExplorationManager::state_timer_callback, this));
-
-        RCLCPP_INFO(this->get_logger(), "Exploration Manager Node started");
+        // Create publisher for /start_exploration topic
+        start_exploration_publisher_ = this->create_publisher<std_msgs::msg::Bool>(
+            "/start_exploration", 10);
         
-        // Start exploration automatically
-        start_exploration();
+        // Create subscriber for /exploration_finish topic
+        exploration_finish_subscriber_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/exploration_finish", 10,
+            std::bind(&ExplorationManager::exploration_finish_callback, this, std::placeholders::_1));
+        
+        // Create subscriber for current robot pose from state estimation
+        pose_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "/state_estimation", 10,
+            std::bind(&ExplorationManager::state_estimation_callback, this, std::placeholders::_1));
+        
+        RCLCPP_INFO(this->get_logger(), "ExplorationManager Node started");
+        RCLCPP_INFO(this->get_logger(), "Waiting for initial robot pose from /state_estimation...");
+        RCLCPP_INFO(this->get_logger(), "Will return home on: timeout (60s) OR /exploration_finish=true");
     }
 
 private:
-    // State variables
-    ExplorationState current_state_;
-    rclcpp::Time mission_start_time_;
-    std::chrono::minutes max_mission_time_;
-    std::vector<DetectedObject> detected_objects_;
-    int current_object_index_ = -1;
-    
-    // Publishers
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr exploration_command_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr navigation_goal_pub_;
-    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr image_capture_pub_;
-    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr go_home_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr waypoint_pub_;
-    
-    // Subscribers
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_complete_subscriber_;
-    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr detected_object_subscriber_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr navigation_status_subscriber_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr image_capture_status_subscriber_;
-    
-    // Timer
-    rclcpp::TimerBase::SharedPtr state_timer_;
-
-    void start_exploration()
+    // Helper function to extract yaw angle from quaternion
+    double getYawFromQuaternion(const geometry_msgs::msg::Quaternion& q)
     {
-        RCLCPP_INFO(this->get_logger(), "Starting exploration mission!");
-        current_state_ = ExplorationState::EXPLORING;
-        mission_start_time_ = this->now();
-        
-        // Send exploration command
-        auto msg = std_msgs::msg::String();
-        msg.data = "start_exploration";
-        exploration_command_pub_->publish(msg);
-        
-        RCLCPP_INFO(this->get_logger(), "Published exploration start command");
+        // Convert quaternion to yaw angle
+        return atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     }
-
-    void detected_object_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg)
+    
+    // Helper function to calculate angular difference between two yaw angles
+    double getAngularDifference(double angle1, double angle2)
     {
-        // Check if this object is already in our list (simple distance check)
-        bool is_new_object = true;
-        for (const auto& obj : detected_objects_) {
-            double distance = std::sqrt(
-                std::pow(obj.location.x - msg->point.x, 2) +
-                std::pow(obj.location.y - msg->point.y, 2)
+        double diff = angle1 - angle2;
+        // Normalize to [-pi, pi]
+        while (diff > M_PI) diff -= 2.0 * M_PI;
+        while (diff < -M_PI) diff += 2.0 * M_PI;
+        return fabs(diff);
+    }
+    
+    void state_estimation_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        // Extract pose from odometry message
+        current_pose_.header = msg->header;
+        current_pose_.pose = msg->pose.pose;
+        
+        // If we're waiting for initial pose, start the forward movement sequence
+        if (current_state_ == RobotState::WAITING_FOR_INITIAL_POSE && !initial_pose_received_)
+        {
+            initial_pose_received_ = true;
+            starting_pose_ = current_pose_;
+            
+            RCLCPP_INFO(this->get_logger(), "Initial pose received: (%.2f, %.2f, %.2f)", 
+                        starting_pose_.pose.position.x, 
+                        starting_pose_.pose.position.y, 
+                        starting_pose_.pose.position.z);
+            
+            start_initial_forward_movement();
+        }
+        
+        // Check if robot has reached the forward target position
+        if (current_state_ == RobotState::MOVING_FORWARD_INITIAL)
+        {
+            double distance_to_target = sqrt(
+                pow(current_pose_.pose.position.x - forward_target_position_.x, 2) +
+                pow(current_pose_.pose.position.y - forward_target_position_.y, 2) +
+                pow(current_pose_.pose.position.z - forward_target_position_.z, 2)
             );
-            if (distance < 1.0) { // Consider objects within 1m as the same
-                is_new_object = false;
-                break;
-            }
-        }
-        
-        if (is_new_object) {
-            DetectedObject new_obj;
-            new_obj.id = detected_objects_.size();
-            new_obj.location = msg->point;
-            new_obj.visited = false;
-            new_obj.images_captured = false;
             
-            detected_objects_.push_back(new_obj);
+            RCLCPP_DEBUG(this->get_logger(), "Distance to forward target: %.3f meters", distance_to_target);
             
-            RCLCPP_INFO(this->get_logger(), "New object detected at (%.2f, %.2f, %.2f) - Object ID: %d",
-                       msg->point.x, msg->point.y, msg->point.z, new_obj.id);
-            
-            // If we're exploring and not currently handling an object, go to this one
-            if (current_state_ == ExplorationState::EXPLORING) {
-                navigate_to_next_object();
-            }
-        }
-    }
-
-    void navigate_to_next_object()
-    {
-        // Find next unvisited object
-        for (size_t i = 0; i < detected_objects_.size(); ++i) {
-            if (!detected_objects_[i].visited) {
-                current_object_index_ = i;
-                current_state_ = ExplorationState::NAVIGATING_TO_OBJECT;
+            if (distance_to_target < 0.2)  // 20cm tolerance
+            {
+                RCLCPP_INFO(this->get_logger(), "Reached forward target position! Distance: %.3f m", distance_to_target);
                 
-                // Send navigation goal
-                auto nav_msg = geometry_msgs::msg::PoseStamped();
-                nav_msg.header.stamp = this->now();
-                nav_msg.header.frame_id = "map";
-                nav_msg.pose.position = detected_objects_[i].location;
-                nav_msg.pose.orientation.w = 1.0; // Default orientation
+                // Stop continuous publishing
+                if (forward_goal_timer_)
+                {
+                    forward_goal_timer_->cancel();
+                }
                 
-                navigation_goal_pub_->publish(nav_msg);
-                
-                RCLCPP_INFO(this->get_logger(), "Navigating to object %ld at (%.2f, %.2f, %.2f)",
-                           i, detected_objects_[i].location.x, 
-                           detected_objects_[i].location.y, 
-                           detected_objects_[i].location.z);
-                return;
+                save_initial_pose_and_start_exploration();
             }
         }
         
-        // No more unvisited objects, continue exploration
-        current_state_ = ExplorationState::EXPLORING;
-        auto msg = std_msgs::msg::String();
-        msg.data = "continue_exploration";
-        exploration_command_pub_->publish(msg);
-    }
-
-    void navigation_status_callback(const std_msgs::msg::String::SharedPtr msg)
-    {
-        if (current_state_ == ExplorationState::NAVIGATING_TO_OBJECT && msg->data == "goal_reached") {
-            RCLCPP_INFO(this->get_logger(), "Reached object %d, starting image capture", current_object_index_);
-            current_state_ = ExplorationState::CAPTURING_IMAGES;
+        // Check if robot has reached the return home position
+        if (current_state_ == RobotState::RETURNING_HOME)
+        {
+            double distance_to_home = sqrt(
+                pow(current_pose_.pose.position.x - initial_pose_.pose.position.x, 2) +
+                pow(current_pose_.pose.position.y - initial_pose_.pose.position.y, 2) +
+                pow(current_pose_.pose.position.z - initial_pose_.pose.position.z, 2)
+            );
             
-            // Start image capture
-            auto capture_msg = std_msgs::msg::Empty();
-            image_capture_pub_->publish(capture_msg);
+            RCLCPP_DEBUG(this->get_logger(), "Distance to home position: %.3f meters", distance_to_home);
             
-            // Mark as visited
-            if (current_object_index_ >= 0 && current_object_index_ < static_cast<int>(detected_objects_.size())) {
-                detected_objects_[current_object_index_].visited = true;
-            }
-        }
-    }
-
-    void image_capture_status_callback(const std_msgs::msg::Bool::SharedPtr msg)
-    {
-        if (current_state_ == ExplorationState::CAPTURING_IMAGES && msg->data == true) {
-            RCLCPP_INFO(this->get_logger(), "Image capture complete for object %d", current_object_index_);
-            
-            // Mark images as captured
-            if (current_object_index_ >= 0 && current_object_index_ < static_cast<int>(detected_objects_.size())) {
-                detected_objects_[current_object_index_].images_captured = true;
-            }
-            
-            // Look for next object or continue exploration
-            navigate_to_next_object();
-        }
-    }
-
-    void state_timer_callback()
-    {
-        // Check if mission time exceeded
-        auto elapsed_time = this->now() - mission_start_time_;
-        if (elapsed_time.seconds() >= max_mission_time_.count() * 60) {
-            if (current_state_ != ExplorationState::GOING_HOME && 
-                current_state_ != ExplorationState::MISSION_COMPLETE) {
-                RCLCPP_WARN(this->get_logger(), "Mission time limit reached (25 min), returning home");
-                go_home();
+            if (distance_to_home < 0.3)  // 30cm tolerance for return home
+            {
+                RCLCPP_INFO(this->get_logger(), "Reached home position! Distance: %.3f m", distance_to_home);
+                start_final_backward_movement();
             }
         }
         
-        // Log current state periodically
-        static int log_counter = 0;
-        if (++log_counter >= 30) { // Log every 30 seconds
-            log_counter = 0;
-            RCLCPP_INFO(this->get_logger(), "Current state: %s, Objects found: %zu, Time elapsed: %.1f min",
-                       state_to_string(current_state_).c_str(), 
-                       detected_objects_.size(),
-                       elapsed_time.seconds() / 60.0);
+        // Check if robot has reached the final backward position (starting position)
+        if (current_state_ == RobotState::MOVING_BACKWARD_FINAL)
+        {
+            double distance_to_start = sqrt(
+                pow(current_pose_.pose.position.x - starting_pose_.pose.position.x, 2) +
+                pow(current_pose_.pose.position.y - starting_pose_.pose.position.y, 2) +
+                pow(current_pose_.pose.position.z - starting_pose_.pose.position.z, 2)
+            );
+            
+            // Check orientation alignment
+            double current_yaw = getYawFromQuaternion(current_pose_.pose.orientation);
+            double target_yaw = getYawFromQuaternion(starting_pose_.pose.orientation);
+            double angular_diff = getAngularDifference(current_yaw, target_yaw);
+            
+            RCLCPP_DEBUG(this->get_logger(), "Distance to start: %.3f m, Angular diff: %.3f rad", 
+                        distance_to_start, angular_diff);
+            
+            if (distance_to_start < 0.15 && angular_diff < 0.1)  // 15cm position, 0.1 rad (~5.7°) orientation tolerance
+            {
+                RCLCPP_INFO(this->get_logger(), "Reached starting position! Distance: %.3f m, Angular diff: %.3f rad", 
+                           distance_to_start, angular_diff);
+                start_maintaining_position();
+            }
         }
     }
-
-    void go_home()
+    
+    void start_initial_forward_movement()
     {
-        current_state_ = ExplorationState::GOING_HOME;
-        RCLCPP_INFO(this->get_logger(), "Mission complete! Going home...");
+        RCLCPP_INFO(this->get_logger(), "Starting initial forward movement (1 meter)");
+        current_state_ = RobotState::MOVING_FORWARD_INITIAL;
         
-        // Send go home command
-        auto msg = std_msgs::msg::Empty();
-        go_home_pub_->publish(msg);
+        // Get yaw angle from current pose quaternion
+        double yaw = getYawFromQuaternion(starting_pose_.pose.orientation);
         
-        // Also publish waypoint to home (0,0,0)
-        auto waypoint_msg = geometry_msgs::msg::PointStamped();
-        waypoint_msg.header.stamp = this->now();
-        waypoint_msg.header.frame_id = "map";
-        waypoint_msg.point.x = 0.0;
-        waypoint_msg.point.y = 0.0;
-        waypoint_msg.point.z = 0.0;
-        waypoint_pub_->publish(waypoint_msg);
+        // Calculate target position 1 meter forward from current position
+        forward_target_position_.x = starting_pose_.pose.position.x + 1.0 * cos(yaw);
+        forward_target_position_.y = starting_pose_.pose.position.y + 1.0 * sin(yaw);
+        forward_target_position_.z = starting_pose_.pose.position.z;
         
-        // Log mission summary
-        int visited_objects = 0;
-        int captured_images = 0;
-        for (const auto& obj : detected_objects_) {
-            if (obj.visited) visited_objects++;
-            if (obj.images_captured) captured_images++;
-        }
+        RCLCPP_INFO(this->get_logger(), "Forward target calculated: (%.2f, %.2f, %.2f) based on yaw: %.2f rad", 
+                    forward_target_position_.x, forward_target_position_.y, forward_target_position_.z, yaw);
         
-        RCLCPP_INFO(this->get_logger(), "Mission Summary: %d objects detected, %d visited, %d with images captured",
-                   static_cast<int>(detected_objects_.size()), visited_objects, captured_images);
+        // Start continuous publishing of forward goal (5 Hz)
+        forward_goal_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(200),
+            std::bind(&ExplorationManager::publish_forward_goal, this));
+        
+        RCLCPP_INFO(this->get_logger(), "Started continuous forward goal publishing at 5 Hz");
     }
-
-    void mission_complete_callback(const std_msgs::msg::Bool::SharedPtr msg)
+    
+    void publish_forward_goal()
     {
-        if (msg->data == true && current_state_ == ExplorationState::GOING_HOME) {
-            current_state_ = ExplorationState::MISSION_COMPLETE;
-            RCLCPP_INFO(this->get_logger(), "Robot returned home successfully! Mission complete.");
-        }
+        auto forward_goal = geometry_msgs::msg::PointStamped();
+        forward_goal.header.stamp = this->now();
+        forward_goal.header.frame_id = "map";
+        forward_goal.point = forward_target_position_;
+        
+        goal_publisher_->publish(forward_goal);
+        
+        RCLCPP_DEBUG(this->get_logger(), "Published forward goal: (%.2f, %.2f, %.2f)", 
+                    forward_goal.point.x, forward_goal.point.y, forward_goal.point.z);
     }
-
-    std::string state_to_string(ExplorationState state)
+    
+    void save_initial_pose_and_start_exploration()
     {
-        switch (state) {
-            case ExplorationState::IDLE: return "IDLE";
-            case ExplorationState::EXPLORING: return "EXPLORING";
-            case ExplorationState::NAVIGATING_TO_OBJECT: return "NAVIGATING_TO_OBJECT";
-            case ExplorationState::CAPTURING_IMAGES: return "CAPTURING_IMAGES";
-            case ExplorationState::GOING_HOME: return "GOING_HOME";
-            case ExplorationState::MISSION_COMPLETE: return "MISSION_COMPLETE";
-            default: return "UNKNOWN";
+        RCLCPP_INFO(this->get_logger(), "Saving initial pose and starting exploration");
+        current_state_ = RobotState::EXPLORING;
+        
+        // Save the current pose as initial pose (after moving 1m forward)
+        initial_pose_ = current_pose_;
+        
+        RCLCPP_INFO(this->get_logger(), "Initial pose saved: (%.2f, %.2f, %.2f)", 
+                    initial_pose_.pose.position.x, 
+                    initial_pose_.pose.position.y, 
+                    initial_pose_.pose.position.z);
+        
+        // Start exploration timeout timer
+        timeout_timer_ = this->create_wall_timer(
+            std::chrono::seconds(30),
+            std::bind(&ExplorationManager::timeout_callback, this));
+        
+        // Signal the tare planner to start exploration
+        auto start_exploration_msg = std_msgs::msg::Bool();
+        start_exploration_msg.data = true;
+        start_exploration_publisher_->publish(start_exploration_msg);
+        
+        RCLCPP_INFO(this->get_logger(), "Published start_exploration = true");
+        RCLCPP_INFO(this->get_logger(), "Exploration phase started with 60-second timeout");
+    }
+    
+    void exploration_finish_callback(const std_msgs::msg::Bool::SharedPtr msg)
+    {
+        if (msg->data == true && current_state_ == RobotState::EXPLORING)
+        {
+            RCLCPP_INFO(this->get_logger(), "Exploration finish received (true) - exploration completed!");
+            start_returning_home("Exploration finished");
+        }
+        else if (msg->data == false && current_state_ == RobotState::EXPLORING)
+        {
+            RCLCPP_INFO(this->get_logger(), "Exploration finish received (false) - exploration still ongoing");
+        }
+        else if (current_state_ != RobotState::EXPLORING)
+        {
+            RCLCPP_DEBUG(this->get_logger(), "Exploration finish received but not in exploration state");
         }
     }
+    
+    void timeout_callback()
+    {
+        if (current_state_ == RobotState::EXPLORING)
+        {
+            RCLCPP_INFO(this->get_logger(), "Exploration timeout reached!");
+            start_returning_home("Timeout");
+        }
+    }
+    
+    void start_returning_home(const std::string& reason)
+    {
+        RCLCPP_INFO(this->get_logger(), "Starting to return to initial pose due to: %s", reason.c_str());
+        current_state_ = RobotState::RETURNING_HOME;
+        
+        // Cancel the timeout timer
+        if (timeout_timer_)
+        {
+            timeout_timer_->cancel();
+        }
+        
+        // Signal the tare planner to stop exploration
+        auto stop_exploration_msg = std_msgs::msg::Bool();
+        stop_exploration_msg.data = false;
+        start_exploration_publisher_->publish(stop_exploration_msg);
+        RCLCPP_INFO(this->get_logger(), "Published start_exploration = false (stopping exploration)");
+        
+        // Start continuous publishing timer to return to initial pose (10 Hz)
+        continuous_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(100),
+            std::bind(&ExplorationManager::publish_return_home_goal, this));
+        
+        RCLCPP_INFO(this->get_logger(), "Started continuous return-home goal publishing at 10 Hz");
+    }
+    
+    void publish_return_home_goal()
+    {
+        // Create and populate the PointStamped message to return to initial pose
+        auto goalpoint_msg = geometry_msgs::msg::PointStamped();
+        
+        // Set header
+        goalpoint_msg.header.stamp = this->now();
+        goalpoint_msg.header.frame_id = "map";
+        
+        // Set point coordinates to initial saved pose
+        goalpoint_msg.point.x = initial_pose_.pose.position.x;
+        goalpoint_msg.point.y = initial_pose_.pose.position.y;
+        goalpoint_msg.point.z = initial_pose_.pose.position.z;
+        
+        // Publish the message
+        goal_publisher_->publish(goalpoint_msg);
+        
+        RCLCPP_DEBUG(this->get_logger(), "Published return-home goalpoint: (%.2f, %.2f, %.2f)",
+                    goalpoint_msg.point.x, goalpoint_msg.point.y, goalpoint_msg.point.z);
+    }
+    
+    void start_final_backward_movement()
+    {
+        RCLCPP_INFO(this->get_logger(), "Starting final movement back to exact starting position");
+        current_state_ = RobotState::MOVING_BACKWARD_FINAL;
+        
+        // Cancel continuous timer
+        if (continuous_timer_)
+        {
+            continuous_timer_->cancel();
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "Target: exact starting position (%.2f, %.2f, %.2f) with original orientation",
+                    starting_pose_.pose.position.x, starting_pose_.pose.position.y, starting_pose_.pose.position.z);
+        
+        // Start continuous publishing of starting pose goal (5 Hz)
+        backward_goal_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(200),
+            std::bind(&ExplorationManager::publish_starting_pose_goal, this));
+        
+        RCLCPP_INFO(this->get_logger(), "Started continuous starting pose goal publishing at 5 Hz");
+    }
+    
+    void publish_starting_pose_goal()
+    {
+        auto pose_goal = geometry_msgs::msg::PoseStamped();
+        pose_goal.header.stamp = this->now();
+        pose_goal.header.frame_id = "map";
+        pose_goal.pose = starting_pose_.pose;  // Use full pose (position + orientation)
+        
+        // Also publish as PointStamped for compatibility with existing goal system
+        auto point_goal = geometry_msgs::msg::PointStamped();
+        point_goal.header = pose_goal.header;
+        point_goal.point = starting_pose_.pose.position;
+        
+        goal_publisher_->publish(point_goal);
+        
+        RCLCPP_DEBUG(this->get_logger(), "Published starting pose goal: (%.2f, %.2f, %.2f)", 
+                    point_goal.point.x, point_goal.point.y, point_goal.point.z);
+    }
+    
+    void start_maintaining_position()
+    {
+        RCLCPP_INFO(this->get_logger(), "Sequence complete! Now maintaining starting position");
+        current_state_ = RobotState::MAINTAINING_START_POSITION;
+        
+        // Cancel backward goal timer
+        if (backward_goal_timer_)
+        {
+            backward_goal_timer_->cancel();
+        }
+        
+        // Start continuous publishing of starting pose to maintain position (2 Hz)
+        maintain_position_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(500),
+            std::bind(&ExplorationManager::publish_maintain_position, this));
+        
+        RCLCPP_INFO(this->get_logger(), "Started maintaining position at starting pose - robot will stay here");
+    }
+    
+    void publish_maintain_position()
+    {
+        auto point_goal = geometry_msgs::msg::PointStamped();
+        point_goal.header.stamp = this->now();
+        point_goal.header.frame_id = "map";
+        point_goal.point = starting_pose_.pose.position;
+        
+        goal_publisher_->publish(point_goal);
+        
+        RCLCPP_DEBUG(this->get_logger(), "Maintaining position: (%.2f, %.2f, %.2f)", 
+                    point_goal.point.x, point_goal.point.y, point_goal.point.z);
+    }
+    
+    void sequence_complete()
+    {
+        // This function is now only called in error cases
+        RCLCPP_WARN(this->get_logger(), "sequence_complete() called - this should not happen in normal operation");
+        current_state_ = RobotState::COMPLETE;
+        
+        // Cancel any active timers
+        if (backward_goal_timer_)
+        {
+            backward_goal_timer_->cancel();
+        }
+        if (maintain_position_timer_)
+        {
+            maintain_position_timer_->cancel();
+        }
+    }
+    
+    // Member variables
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr goal_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_exploration_publisher_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr exploration_finish_subscriber_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr pose_subscriber_;
+    rclcpp::TimerBase::SharedPtr timeout_timer_;
+    rclcpp::TimerBase::SharedPtr continuous_timer_;
+    rclcpp::TimerBase::SharedPtr forward_goal_timer_;
+    rclcpp::TimerBase::SharedPtr backward_goal_timer_;
+    rclcpp::TimerBase::SharedPtr maintain_position_timer_;
+    
+    RobotState current_state_;
+    geometry_msgs::msg::PoseStamped starting_pose_;      // Robot's pose when node starts (final target)
+    geometry_msgs::msg::PoseStamped initial_pose_;       // Robot's pose after moving 1m forward
+    geometry_msgs::msg::PoseStamped current_pose_;
+    geometry_msgs::msg::Point forward_target_position_;  // Target position 1m forward
+    bool initial_pose_received_;
 };
 
 int main(int argc, char * argv[])
@@ -283,7 +405,7 @@ int main(int argc, char * argv[])
     
     auto node = std::make_shared<ExplorationManager>();
     
-    RCLCPP_INFO(node->get_logger(), "Spinning exploration manager node...");
+    RCLCPP_INFO(node->get_logger(), "Spinning ExplorationManager node...");
     rclcpp::spin(node);
     
     rclcpp::shutdown();

@@ -29,21 +29,6 @@ def generate_launch_description():
             default_value=default_config_topics,
             description='Default topics config file'
         ),
-        DeclareLaunchArgument(
-            'start_delay_seconds',
-            default_value='5.0',
-            description='Delay before starting exploration (seconds)'
-        ),
-        DeclareLaunchArgument(
-            'use_empty_messages', 
-            default_value='false',
-            description='Use Empty messages instead of Bool messages for exploration'
-        ),
-        DeclareLaunchArgument(
-            'mission_duration_seconds',
-            default_value='60.0', 
-            description='Mission duration for auto-completion (seconds)'
-        ),
     ]
 
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -207,15 +192,10 @@ def generate_launch_description():
     )
 
     exploration_manager = Node(
-    package='exploration_manager',
-    executable='exploration_manager',
-    name='exploration_manager',
-    output='screen',
-    parameters=[
-        {'use_sim_time': use_sim_time},
-        {'start_delay_seconds': LaunchConfiguration('start_delay_seconds')},
-        {'use_empty_messages': LaunchConfiguration('use_empty_messages')}
-        ]
+        package='exploration_manager',
+        executable='exploration_manager',
+        name='exploration_manager',
+        output='screen',
     )
     
     return LaunchDescription([
